@@ -4,22 +4,29 @@
 //! the whole `wm.` prefix and persists every event to a rotating, turn-keyed
 //! structured log that survives daemon and reboot death.
 //!
-//! The two load-bearing pieces are:
+//! The load-bearing pieces are:
 //! - [`record::Record`] — the on-disk schema the rest of the `lucid` fleet
 //!   (lucid-explain, lucid-live, lucid-mind, lucid-trace, lucid-turn-id)
 //!   reads. Stable and additive-only.
 //! - [`store::LucidStore`] — the file-backed, size-rotating, turn-indexed
 //!   substrate that bounds disk use and survives restarts.
+//! - [`trace`] — turn timeline reconstruction: `lucid trace <id>` and
+//!   `lucid last [N]`.
 //!
 //! The bus-facing recorder and `tap` foreground mode live in the binary
-//! (`src/main.rs`); they are thin glue over these two modules plus the
+//! (`src/main.rs`); they are thin glue over these modules plus the
 //! `agorabus` client.
 
 pub mod record;
 pub mod store;
+pub mod trace;
 
 pub use record::{Record, SCHEMA_VERSION};
 pub use store::{LucidStore, RecordLocation, RotationPolicy};
+pub use trace::{
+    render_summary, render_timeline, summarise_turns, trace_turn, TurnStatus, TurnSummary,
+    TurnTimeline,
+};
 
 /// Current wall-clock time in milliseconds since the Unix epoch.
 ///
