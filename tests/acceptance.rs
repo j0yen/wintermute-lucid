@@ -162,6 +162,40 @@ fn ac1_recorder_identity_contract() {
     assert_eq!(extract_turn_id(&json!({"turn_id": 5})), None); // non-string ignored
 }
 
+// Input-boundary: default_data_dir() returns a path rooted under a recognized
+// env-derived prefix (XDG_CACHE_HOME or HOME), proving the env::var boundary
+// in src/store.rs is exercised by tests/ (HLT-023 coverage).
+//
+// Mutation of the env vars (set_var/remove_var) is unsafe in Rust 1.88 edition
+// 2024 and would conflict with `unsafe_code = "forbid"`. Instead, we probe the
+// current process's env, verify the function's output is consistent with
+// whichever variable the process already has set, and assert the path suffix.
+#[test]
+fn boundary_default_data_dir_uses_env_var() {
+    use std::env;
+
+    let dir = LucidStore::default_data_dir();
+    let dir_str = dir.to_string_lossy();
+
+    // The function must return a path that ends with the standard sub-path.
+    let expected_suffix = "wintermute/lucid";
+    assert!(
+        dir_str.ends_with(expected_suffix),
+        "default_data_dir() must end with '{expected_suffix}', got: {dir_str}"
+    );
+
+    // And it must be rooted under either XDG_CACHE_HOME or HOME (or ".").
+    let xdg = env::var("XDG_CACHE_HOME").unwrap_or_default();
+    let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let rooted_ok = (!xdg.is_empty() && dir_str.starts_with(&xdg))
+        || dir_str.starts_with(&home)
+        || dir_str.starts_with('.');
+    assert!(
+        rooted_ok,
+        "default_data_dir() must be rooted under XDG_CACHE_HOME or HOME: {dir_str}"
+    );
+}
+
 // AC7 (structural): the shipped systemd unit declares the correct ordering
 // deps (After/Wants agorabus, WantedBy wintermute.target). Live activation is
 // an OS-side smoke.

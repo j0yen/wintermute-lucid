@@ -1,0 +1,24 @@
+{
+  "schema": "autobuilder.test_map.v1",
+  "routes": [
+    {
+      "glob": "src/**",
+      "required_proof": [
+        "cargo test --workspace",
+        "tests/acceptance.rs"
+      ]
+    },
+    {
+      "glob": "units/**",
+      "required_proof": ["tests/acceptance.rs#ac7_systemd_unit_has_correct_ordering"]
+    },
+    {
+      "glob": "Cargo.toml",
+      "required_proof": ["cargo check --workspace", "cargo deny check bans licenses sources"]
+    },
+    {
+      "glob": "Cargo.lock",
+      "required_proof": ["cargo deny check bans licenses sources"]
+    }
+  ]
+}
