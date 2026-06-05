@@ -17,12 +17,14 @@
 //! (`src/main.rs`); they are thin glue over these modules plus the
 //! `agorabus` client.
 
+pub mod explain;
 pub mod mind;
 pub mod record;
 pub mod store;
 pub mod trace;
 pub mod watch;
 
+pub use explain::{explain as explain_turn, Persona, TurnExplanation};
 pub use mind::{assemble, decode_reason, most_recent_turn_id, render, TurnMind};
 pub use record::{Record, SCHEMA_VERSION};
 pub use store::{LucidStore, RecordLocation, RotationPolicy};

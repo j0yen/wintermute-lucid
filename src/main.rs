@@ -16,6 +16,9 @@
 //! - `watch [--plain] [--stall-ms <ms>]`: live TUI (or plain text) monitor
 //!   showing pipeline stages, dialog FSM state, and partial transcript in
 //!   real time (lucid-live).
+//! - `explain <turn_id> [--last] [--voice] [--persona hearth|flat] [--json]`:
+//!   narrate a turn in plain language (lucid-explain). Deterministic, no LLM
+//!   call. With `--voice` publishes narration to `wm.tts.say`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -25,7 +28,7 @@ use clap::{Parser, Subcommand};
 
 use agorabus::Client;
 use wintermute_lucid::{
-    assemble, most_recent_turn_id, now_ms, render, render_summary, render_timeline,
+    assemble, explain_turn, most_recent_turn_id, now_ms, render, render_summary, render_timeline,
     summarise_turns, trace_turn, LucidStore, Record, RotationPolicy, TurnStatus,
 };
 use wintermute_lucid::watch::{run_plain, run_tui};
@@ -116,6 +119,27 @@ enum Cmd {
         #[arg(long, default_value_t = DEFAULT_STALL_MS)]
         stall_ms: u64,
     },
+    /// Narrate a turn in plain language (lucid-explain).
+    ///
+    /// Deterministic, no LLM call. Explain can work even when the brain is
+    /// the thing that failed. With `--voice` publishes the narration to
+    /// `wm.tts.say`; without it nothing is spoken.
+    Explain {
+        /// The turn id to narrate. Required unless `--last` is given.
+        turn_id: Option<String>,
+        /// Narrate the most recently recorded turn.
+        #[arg(long, conflicts_with = "turn_id")]
+        last: bool,
+        /// Publish the narration to `wm.tts.say` (default: off).
+        #[arg(long)]
+        voice: bool,
+        /// Voice register: hearth (warm, first-person) or flat (diagnostic).
+        #[arg(long, default_value = "flat")]
+        persona: String,
+        /// Emit structured JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -188,8 +212,131 @@ async fn main() -> Result<()> {
                 run_tui(&socket, stall_ms).await
             }
         }
+        Cmd::Explain {
+            turn_id,
+            last,
+            voice,
+            persona,
+            json,
+        } => {
+            let dir = cli
+                .data_dir
+                .unwrap_or_else(LucidStore::default_data_dir);
+            run_explain(&socket, &dir, turn_id.as_deref(), last, voice, &persona, json).await
+        }
     }
 }
+
+// ---------------------------------------------------------------------------
+// explain subcommand
+// ---------------------------------------------------------------------------
+
+/// Narrate a turn in plain language. With `--voice`, publish to `wm.tts.say`.
+///
+/// # Errors
+/// Returns an error if the store cannot be read, the persona string is
+/// invalid, or (when `--voice`) the bus cannot be reached.
+#[allow(clippy::too_many_arguments)]
+async fn run_explain(
+    socket: &std::path::Path,
+    dir: &std::path::Path,
+    turn_id_arg: Option<&str>,
+    use_last: bool,
+    voice: bool,
+    persona_str: &str,
+    json_out: bool,
+) -> Result<()> {
+    use wintermute_lucid::explain::Persona as P;
+
+    let persona: P = persona_str
+        .parse()
+        .map_err(|e: String| anyhow::anyhow!("{e}"))?;
+
+    let store = LucidStore::open(dir, RotationPolicy::default())
+        .with_context(|| format!("opening store at {}", dir.display()))?;
+
+    // Resolve turn_id.
+    let turn_id: String = if use_last || turn_id_arg.is_none() {
+        match most_recent_turn_id(&store)? {
+            Some(id) => id,
+            None => {
+                eprintln!("wm-lucid explain: no turns recorded yet");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // SAFETY: checked above — turn_id_arg is Some when use_last is false.
+        turn_id_arg.unwrap_or("").to_string()
+    };
+
+    if turn_id.is_empty() {
+        eprintln!("wm-lucid explain: turn_id is required (or use --last)");
+        std::process::exit(1);
+    }
+
+    // Load timeline.
+    let records = store
+        .records_for(&turn_id)
+        .context("reading records for turn")?;
+    if records.is_empty() {
+        eprintln!("wm-lucid explain: no records found for turn_id {turn_id:?}");
+        std::process::exit(1);
+    }
+
+    let timeline = match trace_turn(&turn_id, &records) {
+        Some(tl) => tl,
+        None => {
+            eprintln!("wm-lucid explain: could not reconstruct timeline for {turn_id:?}");
+            std::process::exit(1);
+        }
+    };
+
+    // Optionally load mind for route/reply enrichment.
+    let mind_opt = assemble(&store, &turn_id)?;
+
+    // Produce the explanation (pure, deterministic, no bus call).
+    let explanation = explain_turn(&timeline, mind_opt.as_ref(), persona);
+
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&explanation)?);
+    } else {
+        println!("{}", explanation.text);
+    }
+
+    // AC4: --voice publishes narration to wm.tts.say.
+    if voice {
+        publish_tts_say(socket, &explanation.text).await?;
+    }
+
+    Ok(())
+}
+
+/// Publish a text string to `wm.tts.say` on the agorabus so the TTS daemon
+/// speaks it. This is the only bus interaction in `lucid explain` — and only
+/// when `--voice` is explicitly requested.
+async fn publish_tts_say(socket: &std::path::Path, text: &str) -> Result<()> {
+    let mut client = Client::connect(socket)
+        .await
+        .with_context(|| format!("connecting to agorabus at {}", socket.display()))?;
+    let pid = std::process::id();
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    client
+        .announce("wm-lucid-explain", pid, &cwd, "wm-lucid explain narrator")
+        .await
+        .context("announcing lucid-explain peer")?;
+    let payload = serde_json::json!({ "text": text });
+    client
+        .publish("wm.tts.say", payload)
+        .await
+        .context("publishing to wm.tts.say")?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// mind subcommand
+// ---------------------------------------------------------------------------
 
 /// Show the brain's reasoning for `turn_id`.
 fn run_mind(dir: &std::path::Path, turn_id: &str, json_out: bool) -> Result<()> {

@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.5.0 — 2026-06-05
+
+Adds `lucid explain <turn_id>` — plain-language narration of a recorded turn.
+Deterministic, no LLM call: narration is templated from trace+mind structured
+fields. Each failure mode (stt-uncertain, stt-error, dialog-timeout,
+dialog-unheard, brain-error, tts-error) maps to a distinct human sentence.
+`--persona hearth|flat` selects voice register. `--voice` publishes narration
+to `wm.tts.say`; without it nothing is spoken. `--last` narrates the most
+recent recorded turn. Golden-output tests prove determinism.
+
 ## v0.4.0 — 2026-06-05
 
 `lucid watch` live TUI: six-stage pipeline row (wake→capture→stt→dialog→brain→tts) with
