@@ -1,0 +1,17 @@
+[Unit]
+Description=wm-lucid (flight recorder: persists every agorabus wm.* event, turn-keyed and rotating)
+Documentation=https://github.com/j0yen/wintermute-lucid
+PartOf=wintermute.target
+After=agorabus.service
+Wants=agorabus.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/wm-lucid record
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=15
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=wintermute.target

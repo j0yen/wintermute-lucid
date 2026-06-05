@@ -1,0 +1,23 @@
+{
+  "slug": "lucid-tap",
+  "title": "wm-lucid — the flight recorder for the agorabus bus",
+  "target": "cli",
+  "root_motivation": "Every wm.* event already flows over the agorabus bus but nothing records it; wm-lucid subscribes to the whole wm. prefix and persists every event to a rotating, turn-keyed structured log that survives daemon and reboot death. It is the foundational crate the rest of the lucid fleet reads from.",
+  "schema_contract": {
+    "record": "src/record.rs::Record {v, ts_received, topic, turn_id?, from, raw_payload}",
+    "schema_version": 1,
+    "log_format": "NDJSON, one record per line, in segment-<n>.ndjson files",
+    "index": "index.ndjson sidecar: {key, segment, line}; key = turn_id or untagged-<ts>",
+    "data_dir": "$XDG_CACHE_HOME/wintermute/lucid (default ~/.cache/wintermute/lucid)"
+  },
+  "acceptance_criteria": [
+    {"id": 1, "level": "MUST", "text": "Starts, registers as an agorabus peer with a wm-lucid intent tag, and subscribes to the full wm. prefix.", "verification": "ac1_recorder_identity_contract + runtime smoke (agorabus peers)"},
+    {"id": 2, "level": "MUST", "text": "A burst of N published wm.* events results in N persisted records, each carrying {ts_received, topic, turn_id?, from, raw_payload}.", "verification": "ac2_burst_persists_n_records_with_full_schema"},
+    {"id": 3, "level": "MUST", "text": "Records are keyed/indexed by turn_id when present; an event lacking one is still recorded under a synthetic key and never dropped.", "verification": "ac3_turn_id_keyed_and_untagged_never_dropped"},
+    {"id": 4, "level": "MUST", "text": "Log rotation bounds total on-disk size; overflowing a small cap rotates/prunes oldest segments, and prior segments are never truncated.", "verification": "ac4_rotation_bounds_size_and_preserves_unpruned_segments"},
+    {"id": 5, "level": "MUST", "text": "After a restart, records written before the restart are still present and readable.", "verification": "ac5_records_survive_restart"},
+    {"id": 6, "level": "MUST", "text": "wm-lucid tap streams live events as one JSON object per line, honors --topic, and exits cleanly when its stdout pipe closes.", "verification": "ac6_tap_record_is_one_ndjson_object_per_line + sigpipe::reset() + runtime smoke (tap | head)"},
+    {"id": 7, "level": "MUST", "text": "A wm-lucid.service systemd-user unit installs, enables, and comes up active with correct ordering deps.", "verification": "ac7_systemd_unit_has_correct_ordering + OS-side smoke (systemctl --user)"}
+  ],
+  "fleet_note": "lucid-explain, lucid-live, lucid-mind, lucid-trace, lucid-turn-id extend this same wintermute-lucid repo. The Record schema and on-disk log format above are the contract they build on; treat them as additive-only."
+}
