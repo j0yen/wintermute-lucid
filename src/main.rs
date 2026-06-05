@@ -6,6 +6,9 @@
 //! - `tap [--topic <prefix>]`: tail live events to stdout as one JSON object
 //!   per line — the first-class replacement for ad-hoc `agorabus subscribe`
 //!   one-shots.
+//! - `mind <turn_id>`: show the brain's reasoning for a recorded turn —
+//!   route decision, injected context, tool calls+results, and final reply.
+//! - `why`: `mind` for the most recently recorded turn.
 
 use std::path::PathBuf;
 
@@ -13,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use agorabus::Client;
-use wintermute_lucid::{now_ms, LucidStore, Record, RotationPolicy};
+use wintermute_lucid::{assemble, most_recent_turn_id, now_ms, render, LucidStore, Record, RotationPolicy};
 
 /// The intent tag this recorder announces itself with on the bus (AC1).
 const LUCID_INTENT: &str = "wm-lucid recorder";
@@ -55,6 +58,20 @@ enum Cmd {
         #[arg(long)]
         topic: Option<String>,
     },
+    /// Show the brain's reasoning for a specific recorded turn.
+    Mind {
+        /// The turn id to inspect.
+        turn_id: String,
+        /// Emit JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the brain's reasoning for the most recently recorded turn.
+    Why {
+        /// Emit JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -93,6 +110,53 @@ async fn main() -> Result<()> {
         Cmd::Tap { topic } => {
             let prefix = topic.unwrap_or_else(|| WM_PREFIX.to_string());
             run_tap(&socket, &prefix).await
+        }
+        Cmd::Mind { turn_id, json } => {
+            let dir = cli
+                .data_dir
+                .clone()
+                .unwrap_or_else(LucidStore::default_data_dir);
+            run_mind(&dir, &turn_id, json)
+        }
+        Cmd::Why { json } => {
+            let dir = cli
+                .data_dir
+                .clone()
+                .unwrap_or_else(LucidStore::default_data_dir);
+            run_why(&dir, json)
+        }
+    }
+}
+
+/// Show the brain's reasoning for `turn_id`.
+fn run_mind(dir: &std::path::Path, turn_id: &str, json_out: bool) -> Result<()> {
+    let store = LucidStore::open(dir, RotationPolicy::default())
+        .with_context(|| format!("opening store at {}", dir.display()))?;
+    match assemble(&store, turn_id)? {
+        Some(mind) => {
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&mind)?);
+            } else {
+                print!("{}", render(&mind));
+            }
+            Ok(())
+        }
+        None => {
+            eprintln!("wm-lucid mind: no records found for turn_id {turn_id:?}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Show the brain's reasoning for the most recently recorded turn.
+fn run_why(dir: &std::path::Path, json_out: bool) -> Result<()> {
+    let store = LucidStore::open(dir, RotationPolicy::default())
+        .with_context(|| format!("opening store at {}", dir.display()))?;
+    match most_recent_turn_id(&store)? {
+        Some(turn_id) => run_mind(dir, &turn_id, json_out),
+        None => {
+            eprintln!("wm-lucid why: no turns recorded yet");
+            std::process::exit(1);
         }
     }
 }
