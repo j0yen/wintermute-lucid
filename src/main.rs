@@ -13,6 +13,9 @@
 //!   stage-by-stage timeline with per-stage latency (lucid-trace AC1-7).
 //! - `last [N] [--json]`: trace the most recent turn (or last N turns as
 //!   one-line summaries) — lucid-trace AC5.
+//! - `watch [--plain] [--stall-ms <ms>]`: live TUI (or plain text) monitor
+//!   showing pipeline stages, dialog FSM state, and partial transcript in
+//!   real time (lucid-live).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -25,6 +28,7 @@ use wintermute_lucid::{
     assemble, most_recent_turn_id, now_ms, render, render_summary, render_timeline,
     summarise_turns, trace_turn, LucidStore, Record, RotationPolicy, TurnStatus,
 };
+use wintermute_lucid::watch::{run_plain, run_tui};
 
 /// The intent tag this recorder announces itself with on the bus (AC1).
 const LUCID_INTENT: &str = "wm-lucid recorder";
@@ -32,6 +36,9 @@ const LUCID_INTENT: &str = "wm-lucid recorder";
 const LUCID_SESSION: &str = "wm-lucid";
 /// The prefix the recorder subscribes to: the whole wintermute namespace.
 const WM_PREFIX: &str = "wm.";
+
+/// Default stall-detection threshold for `lucid watch`.
+const DEFAULT_STALL_MS: u64 = 8_000;
 
 #[derive(Parser)]
 #[command(name = "wm-lucid", version, about = "Flight recorder for the agorabus bus")]
@@ -99,6 +106,16 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Live pipeline monitor: watch stages light up in real time.
+    Watch {
+        /// Emit a plain text line-per-event stream instead of a TUI.
+        #[arg(long)]
+        plain: bool,
+        /// Milliseconds a stage may stay active before it is flagged as
+        /// stalled (default: 8000).
+        #[arg(long, default_value_t = DEFAULT_STALL_MS)]
+        stall_ms: u64,
+    },
 }
 
 #[tokio::main]
@@ -163,6 +180,13 @@ async fn main() -> Result<()> {
                 .data_dir
                 .unwrap_or_else(LucidStore::default_data_dir);
             run_last(&dir, n.unwrap_or(1), json)
+        }
+        Cmd::Watch { plain, stall_ms } => {
+            if plain {
+                run_plain(&socket, stall_ms).await
+            } else {
+                run_tui(&socket, stall_ms).await
+            }
         }
     }
 }
