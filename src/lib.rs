@@ -21,6 +21,7 @@ pub mod mind;
 pub mod record;
 pub mod store;
 pub mod trace;
+pub mod watch;
 
 pub use mind::{assemble, decode_reason, most_recent_turn_id, render, TurnMind};
 pub use record::{Record, SCHEMA_VERSION};
