@@ -1,6 +1,6 @@
 [package]
 name = "wintermute-lucid"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
 description = "wm-lucid — flight recorder for the agorabus bus: subscribes to the whole wm. prefix and persists every event to a rotating, turn-keyed structured log."
