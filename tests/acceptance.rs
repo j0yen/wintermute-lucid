@@ -5,9 +5,19 @@
 //! test`. For those we test the in-crate contract that the live behavior is
 //! built on (the record schema shape, the shipped unit file's ordering
 //! directives), and leave the world-level check to a runtime smoke.
+//!
+//! lucid-mind ACs (PRD-lucid-mind):
+//! - AC3 (read-side): `lucid mind <turn_id>` assembles route+tools+reply.
+//! - AC4: route reason is decoded into human-readable text.
+//! - AC5: tool calls paired with results; unpaired call shows pending/failed.
+//! - AC6: `lucid why` resolves to the most recent turn.
+//! - AC7: turns without wm.brain.context still render (graceful degrade).
 
 use serde_json::json;
-use wintermute_lucid::{record::extract_turn_id, LucidStore, Record, RotationPolicy, SCHEMA_VERSION};
+use wintermute_lucid::{
+    assemble, decode_reason, most_recent_turn_id, record::extract_turn_id, render, LucidStore,
+    Record, RotationPolicy, SCHEMA_VERSION,
+};
 
 fn rec(ts: u64, topic: &str, turn: Option<&str>) -> Record {
     let payload = match turn {
@@ -195,6 +205,215 @@ fn boundary_default_data_dir_uses_env_var() {
         "default_data_dir() must be rooted under XDG_CACHE_HOME or HOME: {dir_str}"
     );
 }
+
+// ── lucid-mind acceptance tests ────────────────────────────────────────────────
+
+fn make_route_record(ts: u64, turn: &str) -> Record {
+    Record::new(
+        ts,
+        "wm.brain.route".to_string(),
+        "wm-brain".to_string(),
+        json!({
+            "turn_id": turn,
+            "tier": "cloud",
+            "model": "claude-sonnet-4-6",
+            "reason": "command",
+            "latency_ms": 312_u64,
+            "ts": ts,
+        }),
+    )
+}
+
+fn make_tool_call(ts: u64, turn: &str, tool: &str) -> Record {
+    Record::new(
+        ts,
+        "wm.brain.tool.call".to_string(),
+        "wm-brain".to_string(),
+        json!({
+            "turn_id": turn,
+            "tool": tool,
+            "args": {},
+            "ts": ts,
+        }),
+    )
+}
+
+fn make_tool_result(ts: u64, turn: &str, tool: &str, ok: bool, body: serde_json::Value) -> Record {
+    Record::new(
+        ts,
+        "wm.brain.tool.result".to_string(),
+        "wm-brain".to_string(),
+        json!({
+            "turn_id": turn,
+            "tool": tool,
+            "ok": ok,
+            "body": body,
+            "ts": ts,
+        }),
+    )
+}
+
+fn make_reply(ts: u64, turn: &str, text: &str) -> Record {
+    Record::new(
+        ts,
+        "wm.brain.reply".to_string(),
+        "wm-brain".to_string(),
+        json!({
+            "turn_id": turn,
+            "text": text,
+            "ts": ts,
+        }),
+    )
+}
+
+// lucid-mind AC3: assemble() returns route + tools + reply for a recorded turn.
+#[test]
+fn lucid_mind_ac3_assemble_route_tools_reply() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = LucidStore::open(dir.path(), RotationPolicy::default()).expect("open");
+
+    store.append(&make_route_record(100, "t1")).expect("route");
+    store.append(&make_tool_call(101, "t1", "wm.time.now")).expect("call");
+    store
+        .append(&make_tool_result(102, "t1", "wm.time.now", true, json!({"iso": "2026-06-04"})))
+        .expect("result");
+    store.append(&make_reply(103, "t1", "It's June 4th.")).expect("reply");
+
+    let mind = assemble(&store, "t1").expect("assemble").expect("some");
+
+    assert_eq!(mind.turn_id, "t1");
+    assert_eq!(mind.tier.as_deref(), Some("cloud"));
+    assert_eq!(mind.model.as_deref(), Some("claude-sonnet-4-6"));
+    assert_eq!(mind.latency_ms, Some(312));
+    assert_eq!(mind.reply_text.as_deref(), Some("It's June 4th."));
+    assert!(!mind.reply_destructive);
+    assert_eq!(mind.tools.len(), 1);
+    assert_eq!(mind.tools[0].tool, "wm.time.now");
+    assert!(mind.tools[0].result.is_some());
+}
+
+// lucid-mind AC4: reason string is decoded into human text.
+#[test]
+fn lucid_mind_ac4_reason_decoded() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = LucidStore::open(dir.path(), RotationPolicy::default()).expect("open");
+    store.append(&make_route_record(200, "t2")).expect("route");
+    store.append(&make_reply(201, "t2", "reply")).expect("reply");
+
+    let mind = assemble(&store, "t2").expect("assemble").expect("some");
+    let raw = mind.reason_raw.as_deref().expect("reason_raw");
+    let human = mind.reason_human.as_deref().expect("reason_human");
+
+    assert_eq!(raw, "command");
+    assert!(
+        human.contains("command/control"),
+        "decoded reason must be human-readable: {human}"
+    );
+
+    // Also test the free function directly.
+    assert!(decode_reason("no_key").contains("API key"));
+}
+
+// lucid-mind AC5: tool calls paired with results; call with no result → pending.
+#[test]
+fn lucid_mind_ac5_tool_pairing_and_pending() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = LucidStore::open(dir.path(), RotationPolicy::default()).expect("open");
+    store.append(&make_route_record(300, "t3")).expect("route");
+    store
+        .append(&make_tool_call(301, "t3", "wm.time.now"))
+        .expect("call1");
+    store
+        .append(&make_tool_call(302, "t3", "wm.calendar.list"))
+        .expect("call2");
+    // Only the first tool has a result.
+    store
+        .append(&make_tool_result(303, "t3", "wm.time.now", true, json!({"time": "15:00"})))
+        .expect("result1");
+    store.append(&make_reply(304, "t3", "done")).expect("reply");
+
+    let mind = assemble(&store, "t3").expect("assemble").expect("some");
+    assert_eq!(mind.tools.len(), 2);
+
+    let t0 = &mind.tools[0];
+    let t1 = &mind.tools[1];
+    assert_eq!(t0.tool, "wm.time.now");
+    assert!(t0.result.is_some(), "wm.time.now should have a result");
+    assert_eq!(t1.tool, "wm.calendar.list");
+    assert!(t1.result.is_none(), "wm.calendar.list should show pending");
+
+    // render() must include both tools with the correct status markers.
+    let rendered = render(&mind);
+    assert!(rendered.contains("wm.time.now"), "rendered must show tool name");
+    assert!(
+        rendered.contains("pending"),
+        "rendered must show pending for unmatched call"
+    );
+}
+
+// lucid-mind AC6: most_recent_turn_id returns the latest tagged turn.
+#[test]
+fn lucid_mind_ac6_most_recent_turn_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = LucidStore::open(dir.path(), RotationPolicy::default()).expect("open");
+
+    store.append(&make_route_record(400, "early-turn")).expect("early");
+    store.append(&make_reply(401, "early-turn", "old")).expect("reply1");
+    store.append(&make_route_record(500, "later-turn")).expect("later");
+    store.append(&make_reply(501, "later-turn", "new")).expect("reply2");
+
+    let latest = most_recent_turn_id(&store)
+        .expect("most_recent")
+        .expect("some");
+    assert_eq!(latest, "later-turn");
+}
+
+// lucid-mind AC7: turns without wm.brain.context render gracefully.
+#[test]
+fn lucid_mind_ac7_graceful_degrade_without_context() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = LucidStore::open(dir.path(), RotationPolicy::default()).expect("open");
+    store.append(&make_route_record(600, "no-ctx-turn")).expect("route");
+    store
+        .append(&make_reply(601, "no-ctx-turn", "hello"))
+        .expect("reply");
+
+    let mind = assemble(&store, "no-ctx-turn")
+        .expect("assemble")
+        .expect("some");
+    // context_available must be false — no wm.brain.context event was recorded.
+    assert!(!mind.context_available);
+    // Still gets route and reply.
+    assert_eq!(mind.tier.as_deref(), Some("cloud"));
+    assert_eq!(mind.reply_text.as_deref(), Some("hello"));
+
+    // render() must note context unavailable, not panic.
+    let rendered = render(&mind);
+    assert!(
+        rendered.contains("unavailable"),
+        "must mention context unavailable: {rendered}"
+    );
+}
+
+// lucid-mind: assemble() returns None for an unknown turn_id.
+#[test]
+fn lucid_mind_unknown_turn_returns_none() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LucidStore::open(dir.path(), RotationPolicy::default()).expect("open");
+    let result = assemble(&store, "nonexistent-turn").expect("no error");
+    assert!(result.is_none());
+}
+
+// lucid-mind: most_recent_turn_id returns None on empty store.
+#[test]
+fn lucid_mind_empty_store_no_recent_turn() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LucidStore::open(dir.path(), RotationPolicy::default()).expect("open");
+    let result = most_recent_turn_id(&store).expect("no error");
+    assert!(result.is_none());
+}
+
+// ── Original structural AC7 ────────────────────────────────────────────────────
 
 // AC7 (structural): the shipped systemd unit declares the correct ordering
 // deps (After/Wants agorabus, WantedBy wintermute.target). Live activation is
